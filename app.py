@@ -1,8 +1,10 @@
 import streamlit as st
 from PIL import Image
 import numpy as np
+import mediapipe as mp
 from rembg import remove
 import io
+import cv2
 
 st.set_page_config(page_title="Virtual Try-On", layout="wide")
 st.title("👕 Virtual Try-On App")
@@ -11,6 +13,15 @@ st.sidebar.header("Upload Images")
 user_image = st.sidebar.file_uploader("Upload your photo (full body)", type=["jpg","jpeg","png"])
 clothing_image = st.sidebar.file_uploader("Upload clothing item", type=["jpg","jpeg","png"])
 
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
+
+def get_body_landmarks(img):
+    img_rgb = np.array(img.convert("RGB"))
+    with mp_pose.Pose(static_image_mode=True, model_complexity=2) as pose:
+        results = pose.process(img_rgb)
+    return results.pose_landmarks, img_rgb.shape
+
 def remove_background(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -18,22 +29,45 @@ def remove_background(img):
     return Image.open(io.BytesIO(result)).convert("RGBA")
 
 def overlay_clothing(person_img, clothing_img):
-    person = person_img.convert("RGBA")
+    landmarks, shape = get_body_landmarks(person_img)
+    ph, pw = shape[:2]
+
     clothing = remove_background(clothing_img)
 
-    pw, ph = person.size
-    cw, ch = clothing.size
+    if landmarks:
+        lm = landmarks.landmark
+        # get shoulder positions
+        left_shoulder = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
+        right_shoulder = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        left_hip = lm[mp_pose.PoseLandmark.LEFT_HIP]
+        right_hip = lm[mp_pose.PoseLandmark.RIGHT_HIP]
 
-    # scale clothing to 60% of person width
-    target_w = int(pw * 0.6)
-    scale = target_w / cw
-    target_h = int(ch * scale)
-    clothing = clothing.resize((target_w, target_h), Image.LANCZOS)
+        # calculate torso dimensions
+        shoulder_width = abs(left_shoulder.x - right_shoulder.x) * pw
+        torso_height = abs(left_shoulder.y - left_hip.y) * ph
 
-    # paste at center-top area (torso)
-    paste_x = (pw - target_w) // 2
-    paste_y = int(ph * 0.2)
+        target_w = int(shoulder_width * 1.8)
+        target_h = int(torso_height * 1.6)
 
+        clothing = clothing.resize((target_w, target_h), Image.LANCZOS)
+
+        # center between shoulders
+        center_x = int((left_shoulder.x + right_shoulder.x) / 2 * pw)
+        top_y = int(min(left_shoulder.y, right_shoulder.y) * ph)
+
+        paste_x = center_x - target_w // 2
+        paste_y = top_y - int(ph * 0.02)
+
+    else:
+        # fallback if no pose detected
+        target_w = int(pw * 0.6)
+        scale = target_w / clothing.width
+        target_h = int(clothing.height * scale)
+        clothing = clothing.resize((target_w, target_h), Image.LANCZOS)
+        paste_x = (pw - target_w) // 2
+        paste_y = int(ph * 0.2)
+
+    person = person_img.convert("RGBA")
     result = person.copy()
     result.paste(clothing, (paste_x, paste_y), clothing)
     return result
